@@ -81,6 +81,17 @@ checkpoints/
 
 If you already have the Wan2.1 files elsewhere, point `--model_dir` to the folder that contains `Wan-AI/`.
 
+### Optional: pre-encode the prompts and drop the text encoder
+
+FixAnything uses fixed prompts, so the 11 GB umT5-XXL text encoder always produces the same embeddings. `scripts/encode_prompts.py` computes them once (a ~13 MB `prompt_embeds.pt`); afterwards `run_inference.py` picks that file up automatically, skips loading the text encoder and tokenizer, and `models_t5_umt5-xxl-enc-bf16.pth` can be deleted:
+
+```bash
+python scripts/encode_prompts.py --model_dir checkpoints
+rm checkpoints/Wan-AI/Wan2.1-I2V-14B-480P/models_t5_umt5-xxl-enc-bf16.pth   # optional
+```
+
+To use a custom prompt later, encode it first (`--prompt "..."` / `--negative_prompt "..."`; the file is merged, not overwritten), or pass `--prompt_embeds none` to `run_inference.py` to load the text encoder instead.
+
 ## 🚀 Run Inference on a Rendered Video
 
 `run_inference.py` refines a rendered video (a video file, or a folder of frames). `examples/` contains one DL3DV clip rendered by 3D Gaussian Splatting and by a sparse point-track renderer:

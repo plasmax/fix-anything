@@ -17,13 +17,17 @@ from fixanything.data import load_frames, save_video, crop_and_resize, side_by_s
 
 # Base model (same layout on ModelScope and Hugging Face).
 WAN_MODEL_ID = "Wan-AI/Wan2.1-I2V-14B-480P"
+WAN_TEXT_ENCODER_FILE = "models_t5_umt5-xxl-enc-bf16.pth"
 WAN_MODEL_FILES = [
     "diffusion_pytorch_model*.safetensors",
-    "models_t5_umt5-xxl-enc-bf16.pth",
+    WAN_TEXT_ENCODER_FILE,
     "Wan2.1_VAE.pth",
     "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
 ]
 WAN_TOKENIZER_FILES = "google/*"
+# Precomputed prompt embeddings (scripts/encode_prompts.py). If this file exists, the text encoder and
+# tokenizer are not loaded (and need not be present) -- see `load_pipeline(prompt_embeds=...)`.
+PROMPT_EMBEDS_FILE = "prompt_embeds.pt"
 
 DEFAULT_PROMPT = "A clean, high-quality, photorealistic video with sharp details, smooth motion, and natural lighting."
 DEFAULT_NEGATIVE_PROMPT = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
@@ -39,19 +43,37 @@ def _model_config(model_dir, pattern, download_source="huggingface", **kwargs):
 
 
 def load_pipeline(lora_path, model_dir="checkpoints", device="cuda", torch_dtype=torch.bfloat16,
-                  lora_alpha=1.0, download_source="huggingface"):
+                  lora_alpha=1.0, download_source="huggingface", prompt_embeds="auto"):
     """Build the Wan2.1-I2V-14B pipeline, apply the FixAnything LoRA and enable VRAM offloading.
 
     Base-model files are looked up in `<model_dir>/Wan-AI/Wan2.1-I2V-14B-480P/` and downloaded
     from `download_source` ("huggingface" or "modelscope") if missing.
+
+    prompt_embeds: precomputed prompt embeddings written by scripts/encode_prompts.py.
+        "auto" (default): use `<model_dir>/prompt_embeds.pt` if it exists, else load the text encoder.
+        A path: use that file (must exist). None: always load the text encoder.
+        When embeddings are used, the umT5 text encoder and tokenizer are neither loaded nor downloaded.
     """
     if not os.path.exists(lora_path):
         raise FileNotFoundError(f"FixAnything LoRA not found: {lora_path}")
+    if prompt_embeds == "auto":
+        candidate = os.path.join(model_dir, PROMPT_EMBEDS_FILE)
+        prompt_embeds = candidate if os.path.isfile(candidate) else None
+    elif prompt_embeds is not None and not os.path.isfile(prompt_embeds):
+        raise FileNotFoundError(f"Prompt embeddings not found: {prompt_embeds} (create them with scripts/encode_prompts.py)")
+
+    model_files = WAN_MODEL_FILES
+    tokenizer_config = _model_config(model_dir, WAN_TOKENIZER_FILES, download_source)
+    if prompt_embeds is not None:
+        print(f"[load_pipeline] Using precomputed prompt embeddings from {prompt_embeds}; text encoder not loaded.")
+        model_files = [f for f in WAN_MODEL_FILES if f != WAN_TEXT_ENCODER_FILE]
+        tokenizer_config = None
     pipe = WanVideoPipeline.from_pretrained(
         torch_dtype=torch_dtype, device=device,
-        model_configs=[_model_config(model_dir, p, download_source, offload_device="cpu") for p in WAN_MODEL_FILES],
-        tokenizer_config=_model_config(model_dir, WAN_TOKENIZER_FILES, download_source),
+        model_configs=[_model_config(model_dir, p, download_source, offload_device="cpu") for p in model_files],
+        tokenizer_config=tokenizer_config,
         redirect_common_files=False,
+        prompt_embeds_path=prompt_embeds,
     )
     pipe.load_lora(pipe.dit, lora_path, alpha=lora_alpha)
     pipe.enable_vram_management()
@@ -113,6 +135,9 @@ def parse_args():
     p.add_argument("--lora_path", type=str, default="checkpoints/fixanything_lora.safetensors")
     p.add_argument("--model_dir", type=str, default="checkpoints",
                    help="Folder containing Wan-AI/Wan2.1-I2V-14B-480P/ (downloaded there if missing).")
+    p.add_argument("--prompt_embeds", type=str, default="auto",
+                   help="Precomputed prompt embeddings from scripts/encode_prompts.py. 'auto' (default) uses "
+                        "<model_dir>/prompt_embeds.pt if present; 'none' always loads the umT5 text encoder.")
     p.add_argument("--clean_frame_indices", type=str, default=None,
                    help='Space-separated indices of input frames to keep as-is (default: first and last, "0 60"). '
                         'Use "" to refine every frame.')
@@ -133,7 +158,8 @@ def main():
     print(f"Loaded {len(frames)} frames from {args.input}")
     clean = None if args.clean_frame_indices is None else [int(x) for x in args.clean_frame_indices.split()]
 
-    pipe = load_pipeline(args.lora_path, args.model_dir)
+    prompt_embeds = None if args.prompt_embeds.lower() == "none" else args.prompt_embeds
+    pipe = load_pipeline(args.lora_path, args.model_dir, prompt_embeds=prompt_embeds)
     gen_video, ref_video = fix_video(
         pipe, frames, clean_frame_indices=clean,
         num_frames=args.num_frames, num_repeat_last=args.num_repeat_last,

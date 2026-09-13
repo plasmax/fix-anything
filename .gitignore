@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 *.egg-info/
 .DS_Store
+checkpoints
+models/
+hf_token.txt
+.venv/

@@ -41,6 +41,9 @@ class WanVideoPipeline(BasePipeline):
         self.scheduler = FlowMatchScheduler(shift=5, sigma_min=0.0, extra_one_step=True)
         self.prompter = WanPrompter(tokenizer_path=tokenizer_path)
         self.text_encoder: WanTextEncoder = None
+        # Precomputed T5 embeddings {prompt_text: (1, 512, 4096) tensor}, see `load_prompt_embeds()` /
+        # scripts/encode_prompts.py. Lets inference run without the 11 GB text encoder.
+        self.prompt_embeds: Optional[dict[str, torch.Tensor]] = None
         self.image_encoder: WanImageEncoder = None
         self.dit: WanModel = None
         self.vae: WanVideoVAE = None
@@ -60,6 +63,17 @@ class WanVideoPipeline(BasePipeline):
         lora = load_state_dict(lora_path, torch_dtype=self.torch_dtype, device=self.device)
         loader = GeneralLoRALoader(torch_dtype=self.torch_dtype, device=self.device)
         loader.load(module, lora, alpha=alpha)
+
+    def load_prompt_embeds(self, path: str):
+        """Load precomputed prompt embeddings (written by scripts/encode_prompts.py).
+
+        Prompts found in this file are used directly by the prompt embedder, so the text encoder is not
+        needed for them and may be left unloaded (`text_encoder is None`).
+        """
+        data = torch.load(path, map_location="cpu", weights_only=True)
+        if not isinstance(data, dict) or "prompts" not in data:
+            raise ValueError(f"{path} is not a prompt-embedding file (expected a dict with a 'prompts' entry).")
+        self.prompt_embeds = data["prompts"]
 
     def enable_vram_management(self, num_persistent_param_in_dit=None, vram_limit=None, vram_buffer=0.5):
         self.vram_management_enabled = True
@@ -170,9 +184,13 @@ class WanVideoPipeline(BasePipeline):
         torch_dtype: torch.dtype = torch.bfloat16,
         device: Union[str, torch.device] = "cuda",
         model_configs: list[ModelConfig] = [],
-        tokenizer_config: ModelConfig = ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/*"),
+        tokenizer_config: Optional[ModelConfig] = ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/*"),
         redirect_common_files: bool = True,
+        prompt_embeds_path: Optional[str] = None,
     ):
+        """`prompt_embeds_path`: precomputed prompt embeddings (scripts/encode_prompts.py). When given, the text
+        encoder and tokenizer are optional: leave the text encoder out of `model_configs` and pass
+        `tokenizer_config=None` to run without them."""
         # Redirect model path
         if redirect_common_files:
             redirect_dict = {
@@ -212,9 +230,14 @@ class WanVideoPipeline(BasePipeline):
             pipe.width_division_factor = pipe.vae.upsampling_factor * 2
 
         # Initialize tokenizer
-        tokenizer_config.download_if_necessary()
         pipe.prompter.fetch_models(pipe.text_encoder)
-        pipe.prompter.fetch_tokenizer(tokenizer_config.path)
+        if tokenizer_config is not None:
+            tokenizer_config.download_if_necessary()
+            pipe.prompter.fetch_tokenizer(tokenizer_config.path)
+
+        # Precomputed prompt embeddings
+        if prompt_embeds_path is not None:
+            pipe.load_prompt_embeds(prompt_embeds_path)
         return pipe
 
     @torch.no_grad()
@@ -331,6 +354,17 @@ class WanVideoUnit_PromptEmbedder(PipelineUnit):
         )
 
     def process(self, pipe: WanVideoPipeline, prompt, positive) -> dict:
+        # Precomputed embeddings first (scripts/encode_prompts.py); fall back to the text encoder.
+        if pipe.prompt_embeds is not None and prompt in pipe.prompt_embeds:
+            prompt_emb = pipe.prompt_embeds[prompt].to(dtype=pipe.torch_dtype, device=pipe.device)
+            return {"context": prompt_emb}
+        if pipe.text_encoder is None:
+            available = list(pipe.prompt_embeds or {})
+            raise KeyError(
+                f"No precomputed embedding for prompt {prompt!r} and no text encoder loaded. "
+                f"Encode it with `python scripts/encode_prompts.py --prompt/--negative_prompt ...` "
+                f"(precomputed prompts: {available})."
+            )
         pipe.load_models_to_device(self.onload_model_names)
         prompt_emb = pipe.prompter.encode_prompt(prompt, positive=positive, device=pipe.device)
         return {"context": prompt_emb}
