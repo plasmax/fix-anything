@@ -3,6 +3,8 @@
 Example:
     python scripts/run_inference.py --input examples/dl3dv_3dgs/input.mp4 --output_dir outputs/dl3dv_3dgs
 
+The DiT weights are found automatically in models/ (original shards, or a Comfy-Org bf16 / fp8 repack --
+see scripts/download_models.py); `--dit <file>` selects one explicitly.
 `load_pipeline()` and `fix_video()` below are the whole inference API.
 """
 import argparse
@@ -14,6 +16,7 @@ import struct
 
 import torch
 from diffsynth.utils import ModelConfig
+from safetensors import safe_open
 
 from fixanything.pipelines import WanVideoPipeline
 from fixanything.data import load_frames, save_video, crop_and_resize, side_by_side
@@ -64,21 +67,21 @@ def safetensors_dtype(path):
 def find_dit(model_dir):
     """Locate the DiT weights in `<model_dir>/Wan-AI/Wan2.1-I2V-14B-480P/`.
 
-    Returns the original multi-file shards (a list) if present, else a single-file repack, preferring bf16.
-    Returns None if nothing is there (the caller falls back to downloading the original).
+    Prefers the lightest option present: the fp8 single-file repack, then the bf16 repack, then the original
+    multi-file shards (returned as a list). None if nothing is there (the caller then downloads the original).
     """
     wan_dir = os.path.join(model_dir, WAN_MODEL_ID)
-    shards = sorted(glob.glob(os.path.join(wan_dir, WAN_DIT_FILES)))
-    if shards:
-        return shards
     repacks = sorted(glob.glob(os.path.join(wan_dir, WAN_DIT_REPACK_FILES)))
-    if not repacks:
-        return None
-    bf16 = [p for p in repacks if p.endswith("_bf16.safetensors")]
-    return (bf16 or repacks)[0]
+    for tag in ("_fp8_e4m3fn", "_bf16"):
+        for path in repacks:
+            if path.endswith(f"{tag}.safetensors"):
+                return path
+    if repacks:
+        return repacks[0]
+    return sorted(glob.glob(os.path.join(wan_dir, WAN_DIT_FILES))) or None
 
 
-def load_pipeline(lora_path, model_dir="checkpoints", device="cuda", torch_dtype=torch.bfloat16,
+def load_pipeline(lora_path, model_dir="models", device="cuda", torch_dtype=torch.bfloat16,
                   lora_alpha=1.0, download_source="huggingface", prompt_embeds="auto",
                   dit_path=None, dit_dtype="auto"):
     """Build the Wan2.1-I2V-14B pipeline, apply the FixAnything LoRA and enable VRAM offloading.
@@ -93,8 +96,8 @@ def load_pipeline(lora_path, model_dir="checkpoints", device="cuda", torch_dtype
     dit_path: explicit DiT weights (original shards or a Comfy-Org single-file repack). None: see `find_dit()`.
     dit_dtype: dtype the DiT weights are stored in while offloaded. "auto": the file's own dtype, so an
         fp8_e4m3fn repack stays fp8 (half the CPU RAM and PCIe traffic); compute is always `torch_dtype`.
-        With fp8 storage the LoRA is kept unmerged so it is not rounded into fp8. The weights are first
-        loaded in `torch_dtype` (lossless for fp8 files) and cast back to fp8 by the VRAM manager.
+        With fp8 storage the LoRA is kept unmerged so it is not rounded into fp8, and `patch_embedding`
+        (fp32 in the Comfy-Org repack) is kept in `torch_dtype`.
     """
     if not os.path.exists(lora_path):
         raise FileNotFoundError(f"FixAnything LoRA not found: {lora_path}")
@@ -116,7 +119,7 @@ def load_pipeline(lora_path, model_dir="checkpoints", device="cuda", torch_dtype
         if dit_dtype == "auto":
             dit_dtype = safetensors_dtype(paths[0])
         print(f"[load_pipeline] DiT: {dit_path} stored as {dit_dtype}, computing in {torch_dtype}.")
-        dit_config = ModelConfig(path=dit_path, offload_device="cpu")
+        dit_config = ModelConfig(path=dit_path, offload_device="cpu", offload_dtype=dit_dtype)
     fp8_dit = dit_dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
 
     model_files = WAN_MODEL_FILES
@@ -134,6 +137,14 @@ def load_pipeline(lora_path, model_dir="checkpoints", device="cuda", torch_dtype
     )
     if pipe.dit is None:
         raise RuntimeError(f"DiffSynth did not recognise {dit_path} as the Wan2.1-I2V-14B DiT.")
+    if fp8_dit:
+        # DiffSynth cast every tensor to fp8, including patch_embedding, which enable_vram_management
+        # keeps in torch_dtype. Reload it from the file at its original precision.
+        params = dict(pipe.dit.patch_embedding.named_parameters(prefix="patch_embedding"))
+        for path in paths:
+            with safe_open(path, framework="pt", device="cpu") as f:
+                for key in set(f.keys()) & set(params):
+                    params[key].data = f.get_tensor(key).to(torch_dtype)
     if not fp8_dit:
         pipe.load_lora(pipe.dit, lora_path, alpha=lora_alpha)
     pipe.enable_vram_management(dit_dtype=dit_dtype if fp8_dit else None)
@@ -194,8 +205,8 @@ def parse_args():
     p.add_argument("--input", type=str, required=True,
                    help="Rendered video file, or a folder of frames.")
     p.add_argument("--output_dir", type=str, required=True)
-    p.add_argument("--lora_path", type=str, default="checkpoints/fixanything_lora.safetensors")
-    p.add_argument("--model_dir", type=str, default="checkpoints",
+    p.add_argument("--lora_path", type=str, default="models/fixanything_lora.safetensors")
+    p.add_argument("--model_dir", type=str, default="models",
                    help="Folder containing Wan-AI/Wan2.1-I2V-14B-480P/ (downloaded there if missing).")
     p.add_argument("--prompt_embeds", type=str, default="auto",
                    help="Precomputed prompt embeddings from scripts/encode_prompts.py. 'auto' (default) uses "

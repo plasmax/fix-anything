@@ -6,8 +6,8 @@ embeddings. This script computes them once and stores them in a small file; afte
 `models_t5_umt5-xxl-enc-bf16.pth` can be deleted.
 
 Example:
-    python scripts/encode_prompts.py --model_dir checkpoints
-    # then optionally:  rm checkpoints/Wan-AI/Wan2.1-I2V-14B-480P/models_t5_umt5-xxl-enc-bf16.pth
+    python scripts/encode_prompts.py --model_dir models
+    # then optionally:  rm models/Wan-AI/Wan2.1-I2V-14B-480P/models_t5_umt5-xxl-enc-bf16.pth
 
 Extra prompts can be added at any time (the output file is merged, not overwritten):
     python scripts/encode_prompts.py --prompt "..." --negative_prompt "..."
@@ -46,7 +46,7 @@ def load_prompt_embeds(path):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Pre-encode FixAnything prompts with umT5-XXL")
-    p.add_argument("--model_dir", type=str, default="checkpoints",
+    p.add_argument("--model_dir", type=str, default="models",
                    help="Folder containing Wan-AI/Wan2.1-I2V-14B-480P/ (text encoder + google/umt5-xxl tokenizer).")
     p.add_argument("--output", type=str, default=None,
                    help="Output file (default: <model_dir>/prompt_embeds.pt). Existing entries are kept and merged.")

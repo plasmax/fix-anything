@@ -60,37 +60,35 @@ pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.
 
 ## 📦 Checkpoints
 
-`scripts/download_models.py` downloads everything into `checkpoints/`: the Wan2.1-I2V-14B-480P base model (~60 GB, from Hugging Face or `--source modelscope`) and the FixAnything LoRA from [kvuong2711/fix-anything](https://huggingface.co/kvuong2711/fix-anything):
+`scripts/download_models.py` downloads the lightest working setup (~22 GB) into `models/`: the Wan2.1-I2V-14B-480P VAE and CLIP image encoder, the FixAnything LoRA from [kvuong2711/fix-anything](https://huggingface.co/kvuong2711/fix-anything), and the fp8_e4m3fn single-file repack of the DiT from [Comfy-Org/Wan_2.1_ComfyUI_repackaged](https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged) (16 GB):
 
 ```bash
-python scripts/download_models.py --model_dir checkpoints
+python scripts/download_models.py                  # fp8 DiT (default, 16 GB)
+python scripts/download_models.py --dit bf16       # Comfy-Org bf16 repack (33 GB)
+python scripts/download_models.py --dit original   # Wan-AI's sharded bf16 release (33 GB, also via --source modelscope)
 ```
 
-The expected layout is:
+The fp8 weights are only a storage format: compute stays in bf16, the LoRA is applied unmerged (so it is not rounded to fp8) and the output is visually equivalent to bf16. They halve the download, the disk footprint and the CPU RAM needed while the model is offloaded, which matters on pods with a ~50 GB RAM limit. `run_inference.py` picks up whichever DiT is present (`--dit <file>` selects one explicitly).
+
+The umT5-XXL text encoder (11 GB) is not downloaded: FixAnything uses fixed prompts, and their embeddings are shipped in the repo as `models/prompt_embeds.pt` (git LFS, ~13 MB), which `run_inference.py` uses automatically. The resulting layout is:
 
 ```
-checkpoints/
-├── Wan-AI/Wan2.1-I2V-14B-480P/
-│   ├── diffusion_pytorch_model-0000?-of-00007.safetensors
-│   ├── models_t5_umt5-xxl-enc-bf16.pth
-│   ├── Wan2.1_VAE.pth
-│   ├── models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth
-│   └── google/umt5-xxl/
-└── fixanything_lora.safetensors
+models/
+├── prompt_embeds.pt                                   (from the repo, via git LFS)
+├── fixanything_lora.safetensors
+└── Wan-AI/Wan2.1-I2V-14B-480P/
+    ├── Wan2.1_VAE.pth
+    ├── models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth
+    └── split_files/diffusion_models/wan2.1_i2v_480p_14B_fp8_e4m3fn.safetensors   (or the bf16 repack / original shards)
 ```
 
 If you already have the Wan2.1 files elsewhere, point `--model_dir` to the folder that contains `Wan-AI/`.
 
-### Optional: pre-encode the prompts and drop the text encoder
+On a fresh RunPod pod, `scripts/setup_runpod.sh` does all of the above (clone, venv, packages, download) in one go; `DIT=bf16 bash scripts/setup_runpod.sh` selects the bf16 DiT.
 
-FixAnything uses fixed prompts, so the 11 GB umT5-XXL text encoder always produces the same embeddings. `scripts/encode_prompts.py` computes them once (a ~13 MB `prompt_embeds.pt`); afterwards `run_inference.py` picks that file up automatically, skips loading the text encoder and tokenizer, and `models_t5_umt5-xxl-enc-bf16.pth` can be deleted:
+### Optional: custom prompts
 
-```bash
-python scripts/encode_prompts.py --model_dir checkpoints
-rm checkpoints/Wan-AI/Wan2.1-I2V-14B-480P/models_t5_umt5-xxl-enc-bf16.pth   # optional
-```
-
-To use a custom prompt later, encode it first (`--prompt "..."` / `--negative_prompt "..."`; the file is merged, not overwritten), or pass `--prompt_embeds none` to `run_inference.py` to load the text encoder instead.
+To use other prompts, download the text encoder (`python scripts/download_models.py --text_encoder`) and either encode them once (`python scripts/encode_prompts.py --prompt "..." --negative_prompt "..."`; `prompt_embeds.pt` is merged, not overwritten) or pass `--prompt_embeds none` to `run_inference.py` to run the text encoder at inference time.
 
 ## 🚀 Run Inference on a Rendered Video
 
