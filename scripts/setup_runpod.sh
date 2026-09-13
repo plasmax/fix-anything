@@ -11,7 +11,7 @@
 #   GIT_NAME / GIT_EMAIL  set global git identity
 set -euo pipefail
 
-FORK_URL="${FORK_URL:-https://github.com/kvuong2711/fix-anything.git}"
+FORK_URL="${FORK_URL:-https://github.com/plasmax/fix-anything.git}"
 WORKDIR="${WORKDIR:-/workspace/fix-anything}"
 PY=/usr/bin/python3.10
 

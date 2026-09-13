@@ -59,8 +59,26 @@ class WanVideoPipeline(BasePipeline):
         ]
         self.model_fn = model_fn_wan_video
 
-    def load_lora(self, module: torch.nn.Module, lora_path: str, alpha=1):
+    def load_lora(self, module: torch.nn.Module, lora_path: str, alpha=1, hotload=False):
+        """Merge the LoRA into the weights, or with `hotload=True` keep it as separate low-rank factors
+        evaluated in `torch_dtype` at inference time. Hotload requires `enable_vram_management()` to have
+        been called first and is what to use when the base weights are stored in fp8: merging would round
+        the LoRA delta into fp8."""
         lora = load_state_dict(lora_path, torch_dtype=self.torch_dtype, device=self.device)
+        if hotload:
+            updated = 0
+            for name, submodule in module.named_modules():
+                if not hasattr(submodule, "lora_A_weights"):
+                    continue
+                lora_a_name, lora_b_name = f"{name}.lora_A.default.weight", f"{name}.lora_B.default.weight"
+                if lora_a_name in lora and lora_b_name in lora:
+                    submodule.lora_A_weights.append(lora[lora_a_name] * alpha)
+                    submodule.lora_B_weights.append(lora[lora_b_name])
+                    updated += 1
+            if updated == 0:
+                raise RuntimeError("LoRA hotload matched no layers; call enable_vram_management() before load_lora(hotload=True).")
+            print(f"{updated} layers received an unmerged LoRA.")
+            return
         loader = GeneralLoRALoader(torch_dtype=self.torch_dtype, device=self.device)
         loader.load(module, lora, alpha=alpha)
 
@@ -75,7 +93,10 @@ class WanVideoPipeline(BasePipeline):
             raise ValueError(f"{path} is not a prompt-embedding file (expected a dict with a 'prompts' entry).")
         self.prompt_embeds = data["prompts"]
 
-    def enable_vram_management(self, num_persistent_param_in_dit=None, vram_limit=None, vram_buffer=0.5):
+    def enable_vram_management(self, num_persistent_param_in_dit=None, vram_limit=None, vram_buffer=0.5, dit_dtype=None):
+        """`dit_dtype`: storage dtype for the offloaded DiT weights (default: their current dtype). fp8 halves
+        CPU RAM and PCIe traffic; compute stays in `torch_dtype`. `patch_embedding` is exempt from fp8 (the
+        Comfy-Org fp8 repack keeps it in fp32 too) and, being tiny, is simply pinned on the GPU."""
         self.vram_management_enabled = True
         if num_persistent_param_in_dit is not None:
             vram_limit = None
@@ -104,21 +125,25 @@ class WanVideoPipeline(BasePipeline):
                 vram_limit=vram_limit,
             )
         if self.dit is not None:
-            dtype = next(iter(self.dit.parameters())).dtype
+            dtype = dit_dtype or next(iter(self.dit.parameters())).dtype
             device = "cpu" if vram_limit is not None else self.device
+            dit_module_map = {
+                torch.nn.Linear: AutoWrappedLinear,
+                torch.nn.Conv3d: AutoWrappedModule,
+                torch.nn.LayerNorm: WanAutoCastLayerNorm,
+                RMSNorm: AutoWrappedModule,
+                torch.nn.Conv2d: AutoWrappedModule,
+                torch.nn.Conv1d: AutoWrappedModule,
+                torch.nn.Embedding: AutoWrappedModule,
+                LayerNorm_FP32: AutoWrappedModule,
+                RMSNorm_FP32: AutoWrappedModule,
+            }
+            if dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                del dit_module_map[torch.nn.Conv3d]
+                self.dit.patch_embedding.to(dtype=self.torch_dtype, device=self.device)
             enable_vram_management(
                 self.dit,
-                module_map = {
-                    torch.nn.Linear: AutoWrappedLinear,
-                    torch.nn.Conv3d: AutoWrappedModule,
-                    torch.nn.LayerNorm: WanAutoCastLayerNorm,
-                    RMSNorm: AutoWrappedModule,
-                    torch.nn.Conv2d: AutoWrappedModule,
-                    torch.nn.Conv1d: AutoWrappedModule,
-                    torch.nn.Embedding: AutoWrappedModule,
-                    LayerNorm_FP32: AutoWrappedModule,
-                    RMSNorm_FP32: AutoWrappedModule,
-                },
+                module_map = dit_module_map,
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
@@ -223,6 +248,14 @@ class WanVideoPipeline(BasePipeline):
         pipe.dit = model_manager.fetch_model("wan_video_dit")
         pipe.vae = model_manager.fetch_model("wan_video_vae")
         pipe.image_encoder = model_manager.fetch_model("wan_video_image_encoder")
+
+        # Tensors loaded from .safetensors are views of one file mmap. The LoRA merge writes into them
+        # (copy-on-write) and any view that never leaves the CPU (e.g. `modulation`) then pins the whole
+        # mapping for the process lifetime, so offloading the DiT after denoising needs a second full copy.
+        # Materialise the parameters while the mapped pages are still clean and reclaimable.
+        if pipe.dit is not None:
+            for param in pipe.dit.parameters():
+                param.data = param.data.clone()
 
         # Size division factor
         if pipe.vae is not None:
