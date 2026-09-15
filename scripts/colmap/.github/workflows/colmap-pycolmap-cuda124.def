@@ -1,0 +1,31 @@
+Bootstrap: docker
+From: colmap/colmap:latest
+
+%labels
+    Description Simple COLMAP + pycolmap-cuda12 image built from colmap/colmap Docker image
+
+%environment
+    export PYTHONNOUSERSITE=1
+
+%post
+    set -eu
+
+    # Ensure pip exists, then install pycolmap-cuda12 only if pycolmap is missing.
+    if ! command -v python3 >/dev/null 2>&1; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 python3-pip
+        rm -rf /var/lib/apt/lists/*
+    elif ! command -v pip3 >/dev/null 2>&1; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-pip
+        rm -rf /var/lib/apt/lists/*
+    fi
+
+    if ! python3 -c "import pycolmap" >/dev/null 2>&1; then
+        python3 -m pip install --no-cache-dir --break-system-packages pycolmap-cuda12
+    fi
+
+%test
+    set -e
+    colmap -h >/dev/null
+    python3 -c "import pycolmap; print('pycolmap OK')"

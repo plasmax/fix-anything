@@ -1,0 +1,43 @@
+name: Build COLMAP + pycolmap Apptainer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Apptainer
+        uses: eWaterCycle/setup-apptainer@v2
+        with:
+          apptainer-version: 1.3.6
+
+      - name: Free disk space (optional but recommended)
+        run: |
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get clean
+          df -h
+
+      - name: Build SIF
+        env:
+          APPTAINER_TMPDIR: ${{ runner.temp }}/apptainer-tmp
+        run: |
+          mkdir -p "$APPTAINER_TMPDIR"
+          apptainer --version
+          sudo -E apptainer build colmap_pycolmap_cuda124.sif scripts/colmap/.github/workflows/colmap-pycolmap-cuda124.def
+
+      - name: Smoke test image
+        run: |
+          apptainer exec colmap_pycolmap_cuda124.sif colmap -h >/dev/null
+          apptainer exec colmap_pycolmap_cuda124.sif python3 -c "import pycolmap; print(pycolmap.__version__)"
+
+      - name: Upload SIF artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: colmap_pycolmap_cuda124_sif
+          path: colmap_pycolmap_cuda124.sif
