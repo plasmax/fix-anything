@@ -20,7 +20,7 @@ PY=/usr/bin/python3.10
 [ -n "${GIT_EMAIL:-}" ] && git config --global user.email "$GIT_EMAIL"
 
 # --- code -------------------------------------------------------------------
-if [ ! -d "$WORKDIR/.git" ]; then git clone "$FORK_URL" "$WORKDIR"; fi
+if [ ! -d "$WORKDIR/.git" ]; then git clone -b bake_prompt "$FORK_URL" "$WORKDIR"; fi
 cd "$WORKDIR"
 
 # --- uv + venv (Python 3.10; uv downloads it if the pod lacks it) -------------
