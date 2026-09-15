@@ -39,6 +39,7 @@ if [ "${MAPANYTHING:-0}" = "1" ]; then
   $V -m pip install --no-build-isolation -e ".[mapanything]" "torchaudio==2.6.0" --extra-index-url https://download.pytorch.org/whl/cu126
 fi
 
+command -v git-lfs >/dev/null || { apt-get update && apt-get install -y git-lfs; }
 # --- weights (DIT / TEXT_ENCODER / HF_TOKEN are read by scripts/download.sh) ----
 [ "${DOWNLOAD:-1}" = "1" ] && bash scripts/download.sh
 
