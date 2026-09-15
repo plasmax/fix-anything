@@ -35,6 +35,8 @@ uv pip install --python $V torch==2.6.0 torchvision==0.21.0 --index-url https://
 $V -m pip install --no-build-isolation -e .
 $V -m pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
 if [ "${MAPANYTHING:-0}" = "1" ]; then
+  # System libraries required by pyrender for headless EGL rendering
+  apt-get update && apt-get install -y --no-install-recommends libegl1 libxrender1
   # torchaudio must be pinned or the extra drags torch to 2.11
   $V -m pip install --no-build-isolation -e ".[mapanything]" "torchaudio==2.6.0" --extra-index-url https://download.pytorch.org/whl/cu126
 fi

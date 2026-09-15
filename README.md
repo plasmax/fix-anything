@@ -52,11 +52,15 @@ pip install "setuptools<82" wheel
 pip install --no-build-isolation -e .
 
 # Optional: MapAnything + pyrender, to reconstruct and render your own captures (see below)
+# Ubuntu/Debian: system libraries required by pyrender for headless rendering
+sudo apt-get update && sudo apt-get install -y libegl1 libxrender1
 pip install --no-build-isolation -e ".[mapanything]"
 
 # Optional but recommended: FlashAttention-2 (used automatically when installed; prebuilt wheel for torch 2.6 / CUDA 12 / Python 3.10)
 pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
 ```
+
+The MapAnything script uses EGL for headless rendering. If it fails with `Unable to load EGL library`, install the system `libegl1` package above (omit `sudo` when running as root). Installing `pyrender` with pip does not install this system library.
 
 ## 📦 Checkpoints
 
